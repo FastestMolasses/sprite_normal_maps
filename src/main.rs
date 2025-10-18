@@ -8,10 +8,14 @@ use bevy::{
 };
 
 #[derive(ShaderType, Debug, Clone, Default)]
-pub struct MyMaterialUniformData {
+pub struct LightUniformData {
     light_pos_world_2d: Vec2,
     light_color: LinearRgba,
     ambient_light_color: LinearRgba,
+    light_radius: f32,
+    light_falloff: f32,
+    light_height: f32,
+    normal_strength: f32,
 }
 
 #[derive(AsBindGroup, Debug, Clone, Asset, TypePath)]
@@ -25,7 +29,7 @@ pub struct NormalMappedMaterial {
     pub normal_texture: Handle<Image>,
 
     #[uniform(4)]
-    pub uniform_data: MyMaterialUniformData,
+    pub uniform_data: LightUniformData,
 }
 
 impl Material2d for NormalMappedMaterial {
@@ -67,6 +71,10 @@ struct MovableLightMarker {
     pub intensity: f32,
     pub ambient_color: Color,
     pub ambient_intensity: f32,
+    pub radius: f32,
+    pub falloff: f32,
+    pub height: f32,
+    pub normal_strength: f32,
 }
 
 fn setup(
@@ -77,15 +85,19 @@ fn setup(
 ) {
     commands.spawn(Camera2d);
 
-    let diffuse_handle: Handle<Image> = asset_server.load("Tree Diffuse 1.png");
-    let normal_handle: Handle<Image> = asset_server.load("Tree Normal Map 1.png");
+    let diffuse_handle: Handle<Image> = asset_server.load("Tree Diffuse 2.png");
+    let normal_handle: Handle<Image> = asset_server.load("Tree Normal Map 2.png");
 
-    // Define initial light properties
+    // Define initial light properties with more control
     let initial_light_props = MovableLightMarker {
         color: WHITE.into(),
-        intensity: 75_000.0,
+        intensity: 1.0,
         ambient_color: DARK_SLATE_GRAY.into(),
         ambient_intensity: 0.2,
+        radius: 300.0,
+        falloff: 1.5,
+        height: 50.0,
+        normal_strength: 0.5,
     };
     let initial_light_pos_xy = Vec2::new(100.0, 50.0);
 
@@ -93,22 +105,27 @@ fn setup(
     let tree_material = custom_materials.add(NormalMappedMaterial {
         diffuse_texture: diffuse_handle,
         normal_texture: normal_handle,
-        uniform_data: MyMaterialUniformData {
+        uniform_data: LightUniformData {
             light_pos_world_2d: initial_light_pos_xy,
             light_color: LinearRgba::from(initial_light_props.color)
-                * initial_light_props.intensity
-                / 75_000.0,
+                * initial_light_props.intensity,
             ambient_light_color: LinearRgba::from(initial_light_props.ambient_color)
                 * initial_light_props.ambient_intensity,
+            light_radius: initial_light_props.radius,
+            light_falloff: initial_light_props.falloff,
+            light_height: initial_light_props.height,
+            normal_strength: initial_light_props.normal_strength,
         },
     });
 
-    let sprite_width = 1024.0;
-    let sprite_height = 1024.0;
+    let sprite_width = 2048.0;
+    let sprite_height = 2048.0;
 
     commands.spawn((
         Mesh2d(meshes.add(Rectangle::new(sprite_width, sprite_height))),
         MeshMaterial2d(tree_material),
+        Transform::from_xyz(0.0, 100.0, 0.0),
+        NormalMappedSprite,
     ));
 
     // Spawn a visible marker for the light source
@@ -129,30 +146,70 @@ fn control_light_properties(
     mut light_query: Query<&mut MovableLightMarker>,
 ) {
     if let Ok(mut light_props) = light_query.single_mut() {
+        let dt = time.delta_secs();
+
         // Control light intensity
         if keyboard_input.pressed(KeyCode::KeyI) {
-            light_props.intensity += 0.2 * time.delta_secs();
+            light_props.intensity += 0.5 * dt;
         }
         if keyboard_input.pressed(KeyCode::KeyK) {
-            light_props.intensity = (light_props.intensity - 0.2 * time.delta_secs()).max(0.0);
+            light_props.intensity = (light_props.intensity - 0.5 * dt).max(0.0);
         }
 
         // Control ambient intensity
         if keyboard_input.pressed(KeyCode::KeyO) {
-            light_props.ambient_intensity += 0.05 * time.delta_secs();
+            light_props.ambient_intensity += 0.3 * dt;
         }
         if keyboard_input.pressed(KeyCode::KeyL) {
-            light_props.ambient_intensity =
-                (light_props.ambient_intensity - 0.05 * time.delta_secs()).max(0.0);
+            light_props.ambient_intensity = (light_props.ambient_intensity - 0.3 * dt).max(0.0);
         }
 
-        // Control spotlight radius
-        // if keyboard_input.pressed(KeyCode::BracketRight) {
-        //     light_props.radius += 50.0 * time.delta_secs();
-        // }
-        // if keyboard_input.pressed(KeyCode::BracketLeft) {
-        //     light_props.radius = (light_props.radius - 50.0 * time.delta_secs()).max(10.0);
-        // }
+        // Control light radius
+        if keyboard_input.pressed(KeyCode::BracketRight) {
+            light_props.radius += 100.0 * dt;
+        }
+        if keyboard_input.pressed(KeyCode::BracketLeft) {
+            light_props.radius = (light_props.radius - 100.0 * dt).max(10.0);
+        }
+
+        // Control light falloff
+        if keyboard_input.pressed(KeyCode::Equal) {
+            light_props.falloff += 0.5 * dt;
+        }
+        if keyboard_input.pressed(KeyCode::Minus) {
+            light_props.falloff = (light_props.falloff - 0.5 * dt).max(0.1);
+        }
+
+        // Control light height
+        if keyboard_input.pressed(KeyCode::KeyU) {
+            light_props.height += 50.0 * dt;
+        }
+        if keyboard_input.pressed(KeyCode::KeyJ) {
+            light_props.height = (light_props.height - 50.0 * dt).max(1.0);
+        }
+
+        // Control normal map strength
+        if keyboard_input.pressed(KeyCode::KeyP) {
+            light_props.normal_strength += 1.0 * dt; // Faster increase
+        }
+        if keyboard_input.pressed(KeyCode::Semicolon) {
+            light_props.normal_strength = (light_props.normal_strength - 1.0 * dt).max(0.0);
+        }
+
+        // Display current values (you might want to use a UI system for this)
+        if keyboard_input.just_pressed(KeyCode::Space) {
+            println!("Light Properties:");
+            println!("  Intensity: {:.2}", light_props.intensity);
+            println!("  Ambient: {:.2}", light_props.ambient_intensity);
+            println!("  Radius: {:.1}", light_props.radius);
+            println!("  Falloff: {:.2}", light_props.falloff);
+            println!("  Height: {:.1}", light_props.height);
+            println!("  Normal Strength: {:.2}", light_props.normal_strength);
+            println!(
+                "Controls: I/K=intensity, O/L=ambient, [/]=radius, +/-=falloff, U/J=height, P/;=normal"
+            );
+            println!("Normal Strength Guide: 0=no effect, 0.5=subtle, 1.0=strong, 2.0=very strong");
+        }
     }
 }
 
@@ -161,19 +218,21 @@ fn handle_input(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     mut query: Query<&mut Transform, With<MovableLightMarker>>,
 ) {
-    const SPEED: f32 = 200.0; // Adjusted speed
+    const SPEED: f32 = 200.0;
     if let Ok(mut light_transform) = query.single_mut() {
+        let dt = time.delta_secs();
+
         if keyboard_input.pressed(KeyCode::KeyW) {
-            light_transform.translation.y += SPEED * time.delta_secs();
+            light_transform.translation.y += SPEED * dt;
         }
         if keyboard_input.pressed(KeyCode::KeyS) {
-            light_transform.translation.y -= SPEED * time.delta_secs();
+            light_transform.translation.y -= SPEED * dt;
         }
         if keyboard_input.pressed(KeyCode::KeyA) {
-            light_transform.translation.x -= SPEED * time.delta_secs();
+            light_transform.translation.x -= SPEED * dt;
         }
         if keyboard_input.pressed(KeyCode::KeyD) {
-            light_transform.translation.x += SPEED * time.delta_secs();
+            light_transform.translation.x += SPEED * dt;
         }
     }
 }
@@ -184,16 +243,18 @@ fn update_material_light_info(
     mut custom_materials: ResMut<Assets<NormalMappedMaterial>>,
     sprite_query: Query<&MeshMaterial2d<NormalMappedMaterial>>,
 ) {
-    if let Ok((light_transform, light_props)) = light_query.single() {
-        if let Ok(material_handle) = sprite_query.single() {
-            if let Some(material) = custom_materials.get_mut(material_handle) {
-                material.uniform_data.light_pos_world_2d = light_transform.translation.truncate();
-                // Normalize intensity somewhat for shader, or adjust shader to handle larger values
-                material.uniform_data.light_color =
-                    LinearRgba::from(light_props.color) * light_props.intensity / 75_000.0;
-                material.uniform_data.ambient_light_color =
-                    LinearRgba::from(light_props.ambient_color) * light_props.ambient_intensity;
-            }
-        }
+    if let Ok((light_transform, light_props)) = light_query.single()
+        && let Ok(material_handle) = sprite_query.single()
+        && let Some(material) = custom_materials.get_mut(material_handle)
+    {
+        material.uniform_data.light_pos_world_2d = light_transform.translation.truncate();
+        material.uniform_data.light_color =
+            LinearRgba::from(light_props.color) * light_props.intensity;
+        material.uniform_data.ambient_light_color =
+            LinearRgba::from(light_props.ambient_color) * light_props.ambient_intensity;
+        material.uniform_data.light_radius = light_props.radius;
+        material.uniform_data.light_falloff = light_props.falloff;
+        material.uniform_data.light_height = light_props.height;
+        material.uniform_data.normal_strength = light_props.normal_strength;
     }
 }

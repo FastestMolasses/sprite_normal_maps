@@ -14,8 +14,12 @@
 @group(2) @binding(4) var<uniform> material_uniforms: MaterialUniforms;
 struct MaterialUniforms {
     light_pos_world_2d: vec2<f32>,  // Light's xy position in world space
-    light_color: vec4<f32>,         // Light's color (rgb) and intensity (a)
-    ambient_light_color: vec4<f32>, // Ambient light (rgb) and intensity (a)
+    light_color: vec4<f32>,         // Light's color and intensity
+    ambient_light_color: vec4<f32>, // Ambient light color and intensity
+    light_radius: f32,              // Light radius
+    light_falloff: f32,             // Light falloff exponent
+    light_height: f32,              // Light Z position
+    normal_strength: f32,           // Normal map strength multiplier
 }
 
 struct VertexInput {
@@ -35,7 +39,11 @@ struct VertexOutput {
 @vertex
 fn vertex(vertex_input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
+
+    // Get the world_from_local transform using Bevy's helper function
     var world_from_local = mesh_functions::get_world_from_local(vertex_input.instance_index);
+
+    // Transform position using Bevy's helper functions
     out.world_position = mesh_functions::mesh2d_position_local_to_world(
         world_from_local,
         vec4<f32>(vertex_input.position, 1.0)
@@ -58,48 +66,77 @@ fn vertex(vertex_input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
-    let diffuse_color_sample = textureSample(diffuse_texture, diffuse_sampler, in.uv);
+    let diffuse_color = textureSample(diffuse_texture, diffuse_sampler, in.uv);
 
     // Skip fully transparent pixels
-    if (diffuse_color_sample.a < 0.01) {
+    if (diffuse_color.a < 0.01) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
 
-    // Calculate distance to light (in 2D space)
-    let light_position_2d = material_uniforms.light_pos_world_2d;
-    let surface_position_2d = in.world_position.xy;
-    let distance_to_light = distance(surface_position_2d, light_position_2d);
+    // Calculate circular light attenuation (creates perfect circle boundary)
+    let light_pos_2d = material_uniforms.light_pos_world_2d;
+    let surface_pos_2d = in.world_position.xy;
+    let distance_to_light = distance(surface_pos_2d, light_pos_2d);
+    let distance_ratio = clamp(distance_to_light / material_uniforms.light_radius, 0.0, 1.0);
+    let circle_attenuation = max(0.0, 1.0 - pow(distance_ratio, material_uniforms.light_falloff));
 
-    // Point light parameters
-    let light_radius = 300.0;  // Radius of the light circle
-    let light_falloff = 1.0;   // Controls how sharp the edge of the light is
-
-    // Calculate pure distance-based attenuation
-    let distance_ratio = min(distance_to_light / light_radius, 1.0);
-    let light_attenuation = 1.0 - pow(distance_ratio, light_falloff);
-
-    // Apply the light with the base diffuse color
-    let light_rgb = material_uniforms.light_color.rgb * material_uniforms.light_color.a;
-    var base_lit_color = diffuse_color_sample.rgb * light_rgb * light_attenuation;
-
-    // Sample normal map
-    var surface_normal_tangent = textureSample(normal_texture, normal_sampler, in.uv).rgb;
-    surface_normal_tangent = normalize(surface_normal_tangent * 2.0 - 1.0);
-
-    // Simple TBN matrix
-    let T = vec3<f32>(1.0, 0.0, 0.0); 
-    let B = vec3<f32>(0.0, 1.0, 0.0);
-    let N = in.world_normal;
-    let tbn = mat3x3<f32>(T, B, N);
-
-    // World space normal
-    let final_surface_normal = normalize(tbn * surface_normal_tangent);
-    let light_direction = normalize(vec3<f32>(0.0, 0.0, 1.0));  // Light from directly above
-    let normal_factor = 0.95 + 0.1 * max(dot(final_surface_normal, light_direction), 0.0);
-    var lit_color = base_lit_color * normal_factor;
-
-    let ambient_rgb = material_uniforms.ambient_light_color.rgb * material_uniforms.ambient_light_color.a;
-    lit_color += diffuse_color_sample.rgb * ambient_rgb;
-
-    return vec4<f32>(lit_color, diffuse_color_sample.a);
+    // Calculate surface lighting with normal map
+    var surface_light_factor = 1.0; // Default to full lighting within circle
+    
+    if (material_uniforms.normal_strength > 0.0) {
+        // Sample and process normal map
+        var normal_sample = textureSample(normal_texture, normal_sampler, in.uv).rgb;
+        normal_sample = (normal_sample * 2.0 - 1.0); // Convert to [-1,1] range
+        
+        // Apply normal strength
+        normal_sample.x *= material_uniforms.normal_strength;
+        normal_sample.y *= material_uniforms.normal_strength;
+        
+        // Build TBN matrix for 2D sprite
+        let tangent = vec3<f32>(1.0, 0.0, 0.0);
+        let bitangent = vec3<f32>(0.0, 1.0, 0.0);
+        let normal_base = vec3<f32>(0.0, 0.0, 1.0);
+        
+        // Transform normal to world space
+        let world_normal = normalize(
+            tangent * normal_sample.x + 
+            bitangent * normal_sample.y + 
+            normal_base * normal_sample.z
+        );
+        
+        // Calculate light direction from surface to light
+        let light_direction = normalize(vec3<f32>(
+            light_pos_2d.x - surface_pos_2d.x,
+            light_pos_2d.y - surface_pos_2d.y,
+            material_uniforms.light_height
+        ));
+        
+        // Calculate how much this surface faces the light
+        let normal_dot_light = dot(world_normal, light_direction);
+        
+        // Dynamic lighting range based on normal strength
+        // Higher normal strength = more dramatic lighting contrast
+        let max_contrast = material_uniforms.normal_strength;
+        let min_light = max(0.1, 1.0 - max_contrast);  // Gets darker as strength increases
+        let max_light = 1.0;  // Always full brightness for surfaces facing light
+        
+        // Map normal dot product from [-1,1] to [min_light, max_light]
+        let normal_factor = (normal_dot_light + 1.0) * 0.5; // Convert to [0,1]
+        surface_light_factor = mix(min_light, max_light, normal_factor);
+    }
+    
+    // Combine circle attenuation with surface lighting
+    let final_light_intensity = circle_attenuation * surface_light_factor;
+    
+    // Apply light color and intensity
+    let light_contribution = material_uniforms.light_color.rgb * 
+                            material_uniforms.light_color.a * final_light_intensity;
+    
+    // Add ambient lighting
+    let ambient_contribution = material_uniforms.ambient_light_color.rgb * 
+                              material_uniforms.ambient_light_color.a;
+    
+    // Final color
+    let final_color = diffuse_color.rgb * (light_contribution + ambient_contribution);
+    return vec4<f32>(final_color, diffuse_color.a);
 }
