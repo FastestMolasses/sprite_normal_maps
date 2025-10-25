@@ -85,8 +85,8 @@ fn setup(
 ) {
     commands.spawn(Camera2d);
 
-    let diffuse_handle: Handle<Image> = asset_server.load("Tree Diffuse 2.png");
-    let normal_handle: Handle<Image> = asset_server.load("Tree Normal Map 2.png");
+    let diffuse_handle: Handle<Image> = asset_server.load("tree_diffuse.png");
+    let normal_handle: Handle<Image> = asset_server.load("tree_normal.png");
 
     // Define initial light properties with more control
     let initial_light_props = MovableLightMarker {
