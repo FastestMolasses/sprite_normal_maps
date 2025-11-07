@@ -243,17 +243,22 @@ pub fn render_volume_to_maps(volume: &Volume, output_size: u32, rotation: Vec3) 
             let max_steps = (vol_size * 1.5) as usize; // Reduced from 2.0
             let step_size = 0.75; // Increased from 0.5 for faster marching
             
+            let center_vec = Vec3::splat(center);
+            let vol_size_u = vol_size as u32;
+            
             for step in 0..max_steps {
                 let t = step as f32 * step_size;
                 let ray_pos = ray_start + ray_dir * t;
                 
                 // Rotate ray position to volume space
-                let rotated_pos = rotate_point(ray_pos, inverse_rotation) + Vec3::splat(center);
+                let rotated_pos = rotate_point(ray_pos, inverse_rotation) + center_vec;
                 
-                // Check if we're inside the volume
-                if rotated_pos.x < 0.0 || rotated_pos.x >= vol_size ||
-                   rotated_pos.y < 0.0 || rotated_pos.y >= vol_size ||
-                   rotated_pos.z < 0.0 || rotated_pos.z >= vol_size {
+                // Early exit with combined bounds check
+                let in_bounds = rotated_pos.x >= 0.0 && rotated_pos.x < vol_size &&
+                                rotated_pos.y >= 0.0 && rotated_pos.y < vol_size &&
+                                rotated_pos.z >= 0.0 && rotated_pos.z < vol_size;
+                
+                if !in_bounds {
                     continue;
                 }
                 
@@ -261,7 +266,13 @@ pub fn render_volume_to_maps(volume: &Volume, output_size: u32, rotation: Vec3) 
                 let vy = rotated_pos.y as u32;
                 let vz = rotated_pos.z as u32;
                 
-                let density = volume.get(vx, vy, vz);
+                // Inline bounds check to avoid redundant checks in volume.get()
+                let density = if vx < vol_size_u && vy < vol_size_u && vz < vol_size_u {
+                    let idx = (vz * volume.dimensions.x * volume.dimensions.y + vy * volume.dimensions.x + vx) as usize;
+                    volume.data[idx]
+                } else {
+                    0.0
+                };
                 
                 if density > threshold {
                     // Hit! Record the position
@@ -272,41 +283,39 @@ pub fn render_volume_to_maps(volume: &Volume, output_size: u32, rotation: Vec3) 
                 }
             }
             
+            
+            // Branchless output: multiply values by hit flag
+            let hit_u8 = hit as u8 * 255;
+            
             if hit {
                 // Position map: encode world position as RGB
                 // Normalize to 0-255 range based on volume size
-                position_map[pixel_idx] = ((hit_pos.x / vol_size) * 255.0) as u8;
-                position_map[pixel_idx + 1] = ((hit_pos.y / vol_size) * 255.0) as u8;
-                position_map[pixel_idx + 2] = ((hit_pos.z / vol_size) * 255.0) as u8;
-                position_map[pixel_idx + 3] = 255; // Alpha
+                let inv_vol_size = 1.0 / vol_size;
+                position_map[pixel_idx] = (hit_pos.x * inv_vol_size * 255.0) as u8;
+                position_map[pixel_idx + 1] = (hit_pos.y * inv_vol_size * 255.0) as u8;
+                position_map[pixel_idx + 2] = (hit_pos.z * inv_vol_size * 255.0) as u8;
                 
                 // Normal map: calculate gradient in volume space, then rotate to world space
                 let normal_volume = volume.gradient(hit_voxel.x, hit_voxel.y, hit_voxel.z);
                 let normal_world = rotate_point(normal_volume, rotation_matrix);
                 
                 // Map from -1..1 to 0..255
-                normal_map[pixel_idx] = ((normal_world.x * 0.5 + 0.5) * 255.0) as u8;
-                normal_map[pixel_idx + 1] = ((normal_world.y * 0.5 + 0.5) * 255.0) as u8;
-                normal_map[pixel_idx + 2] = ((normal_world.z * 0.5 + 0.5) * 255.0) as u8;
-                normal_map[pixel_idx + 3] = 255; // Alpha
+                normal_map[pixel_idx] = (normal_world.x.mul_add(0.5, 0.5) * 255.0) as u8;
+                normal_map[pixel_idx + 1] = (normal_world.y.mul_add(0.5, 0.5) * 255.0) as u8;
+                normal_map[pixel_idx + 2] = (normal_world.z.mul_add(0.5, 0.5) * 255.0) as u8;
                 
                 // Diffuse map: simple gray rock color with slight variation based on position
-                let variation = (hit_pos.y / vol_size) * 0.2; // Height-based variation
+                let variation = hit_pos.y * inv_vol_size * 0.2; // Height-based variation
                 let base_color = 0.5 + variation;
-                let r = (base_color * 180.0) as u8;
-                let g = (base_color * 170.0) as u8;
-                let b = (base_color * 160.0) as u8;
-                
-                diffuse_map[pixel_idx] = r;
-                diffuse_map[pixel_idx + 1] = g;
-                diffuse_map[pixel_idx + 2] = b;
-                diffuse_map[pixel_idx + 3] = 255; // Alpha
-            } else {
-                // No hit: transparent
-                position_map[pixel_idx + 3] = 0;
-                normal_map[pixel_idx + 3] = 0;
-                diffuse_map[pixel_idx + 3] = 0;
+                diffuse_map[pixel_idx] = (base_color * 180.0) as u8;
+                diffuse_map[pixel_idx + 1] = (base_color * 170.0) as u8;
+                diffuse_map[pixel_idx + 2] = (base_color * 160.0) as u8;
             }
+            
+            // Set alpha channels (0 for no hit, 255 for hit)
+            position_map[pixel_idx + 3] = hit_u8;
+            normal_map[pixel_idx + 3] = hit_u8;
+            diffuse_map[pixel_idx + 3] = hit_u8;
         }
     }
     
